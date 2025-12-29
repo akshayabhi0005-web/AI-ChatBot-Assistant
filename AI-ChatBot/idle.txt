@@ -1,0 +1,291 @@
+import pigpio
+import time
+from datetime import datetime
+from PIL import Image, ImageDraw, ImageFont
+import st7735
+
+# ================================
+# DHT11 SENSOR SETUP
+# ================================
+DHT_PIN = 4
+
+class DHT11Reader:
+    """Read DHT11 sensor using pigpio directly"""
+    def __init__(self, pi, gpio):
+        self.pi = pi
+        self.gpio = gpio
+        self.high_tick = 0
+        self.bit = 40
+        self.temperature = -999
+        self.humidity = -999
+        self.either_edge_cb = None
+        
+    def _cb(self, gpio, level, tick):
+        """Decode DHT11 sensor stream"""
+        diff = pigpio.tickDiff(self.high_tick, tick)
+        
+        if level == 0:
+            if diff >= 50:
+                val = 1
+            else:
+                val = 0
+            
+            if self.bit >= 40:
+                self.bit = 40
+            elif self.bit >= 32:
+                self.humidity = self.humidity << 1 | val
+            elif self.bit >= 24:
+                pass
+            elif self.bit >= 16:
+                self.temperature = self.temperature << 1 | val
+            elif self.bit >= 8:
+                pass
+            else:
+                pass
+            
+            self.bit -= 1
+        
+        elif level == 1:
+            self.high_tick = tick
+    
+    def trigger(self):
+        """Trigger a new reading"""
+        self.humidity = 0
+        self.temperature = 0
+        self.bit = 40
+        
+        if self.either_edge_cb:
+            self.either_edge_cb.cancel()
+            self.either_edge_cb = None
+        
+        self.pi.set_mode(self.gpio, pigpio.OUTPUT)
+        self.pi.write(self.gpio, pigpio.LOW)
+        time.sleep(0.02)
+        
+        self.pi.set_mode(self.gpio, pigpio.INPUT)
+        self.pi.set_pull_up_down(self.gpio, pigpio.PUD_UP)
+        
+        self.either_edge_cb = self.pi.callback(self.gpio, pigpio.EITHER_EDGE, self._cb)
+    
+    def cancel(self):
+        """Cancel the sensor reading"""
+        if self.either_edge_cb:
+            self.either_edge_cb.cancel()
+            self.either_edge_cb = None
+
+# ================================
+# ST7735 TFT DISPLAY SETUP
+# ================================
+disp = st7735.ST7735(
+    port=0,
+    cs=st7735.BG_SPI_CS_BACK,
+    dc="GPIO24",
+    rst="GPIO25",
+    backlight="GPIO22",
+    rotation=180,  # Portrait orientation
+    invert=False,
+    spi_speed_hz=4000000
+)
+disp.begin()
+
+WIDTH, HEIGHT = disp.width, disp.height
+img = Image.new("RGB", (WIDTH, HEIGHT), (0, 0, 0))
+draw = ImageDraw.Draw(img)
+
+# ================================
+# LOAD FONTS
+# ================================
+try:
+    # Time font - large
+    font_time = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 16)
+    # Temperature/Humidity - medium
+    font_data = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 20)
+    # Labels - small
+    font_label = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 10)
+    # Message - fancy italic
+    font_message = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Oblique.ttf", 11)
+except:
+    print("⚠️  Using default font")
+    font_time = ImageFont.load_default()
+    font_data = ImageFont.load_default()
+    font_label = ImageFont.load_default()
+    font_message = ImageFont.load_default()
+
+# ================================
+# DISPLAY MANAGER
+# ================================
+class SensorDisplay:
+    def __init__(self):
+        self.last_temp = None
+        self.last_humidity = None
+        
+    def update(self, temperature, humidity):
+        """Update display with sensor data and time"""
+        # Clear screen
+        draw.rectangle((0, 0, WIDTH, HEIGHT), fill=(0, 0, 20))  # Dark blue background
+        
+        # Get current time
+        now = datetime.now()
+        time_str = now.strftime("%H:%M:%S")
+        date_str = now.strftime("%d %b")
+        
+        # Draw time at top
+        time_width = draw.textlength(time_str, font=font_time)
+        draw.text(((WIDTH - time_width) // 2, 5), time_str, fill=(100, 200, 255), font=font_time)
+        date_width = draw.textlength(date_str, font=font_label)
+        draw.text(((WIDTH - date_width) // 2, 25), date_str, fill=(150, 150, 150), font=font_label)
+        
+        # Draw separator line
+        draw.line([(5, 40), (WIDTH - 5, 40)], fill=(50, 50, 100), width=1)
+        
+        # Temperature section
+        y_pos = 48
+        temp_label_width = draw.textlength("TEMP", font=font_label)
+        draw.text(((WIDTH - temp_label_width) // 2, y_pos), "TEMP", fill=(255, 150, 100), font=font_label)
+        
+        if temperature is not None and 0 <= temperature <= 80:
+            self.last_temp = temperature
+            temp_color = (255, 100, 100)  # Red
+        else:
+            temp_color = (150, 150, 150)  # Gray if stale
+        
+        if self.last_temp is not None:
+            temp_str = f"{self.last_temp}°C"
+            temp_width = draw.textlength(temp_str, font=font_data)
+            draw.text(((WIDTH - temp_width) // 2, y_pos + 14), temp_str, fill=temp_color, font=font_data)
+        else:
+            # Don't display anything until first successful read
+            loading_text = "Reading..."
+            loading_width = draw.textlength(loading_text, font=font_label)
+            draw.text(((WIDTH - loading_width) // 2, y_pos + 20), loading_text, fill=(100, 100, 100), font=font_label)
+        
+        # Humidity section
+        y_pos = 88
+        humid_label_width = draw.textlength("HUMIDITY", font=font_label)
+        draw.text(((WIDTH - humid_label_width) // 2, y_pos), "HUMIDITY", fill=(100, 200, 255), font=font_label)
+        
+        if humidity is not None and 0 <= humidity <= 100:
+            self.last_humidity = humidity
+            humid_color = (100, 200, 255)  # Blue
+        else:
+            humid_color = (150, 150, 150)  # Gray if stale
+        
+        if self.last_humidity is not None:
+            humid_str = f"{self.last_humidity}%"
+            humid_width = draw.textlength(humid_str, font=font_data)
+            draw.text(((WIDTH - humid_width) // 2, y_pos + 14), humid_str, fill=humid_color, font=font_data)
+        else:
+            # Don't display anything until first successful read
+            loading_text = "Reading..."
+            loading_width = draw.textlength(loading_text, font=font_label)
+            draw.text(((WIDTH - loading_width) // 2, y_pos + 20), loading_text, fill=(100, 100, 100), font=font_label)
+        
+        # Draw separator line
+        draw.line([(5, 128), (WIDTH - 5, 128)], fill=(50, 50, 100), width=1)
+        
+        # Message at bottom - centered and fancy
+        message = "Say 'Zeno'"
+        message2 = "to start chatting"
+        
+        msg1_bbox = draw.textbbox((0, 0), message, font=font_message)
+        msg1_width = msg1_bbox[2] - msg1_bbox[0]
+        msg1_x = (WIDTH - msg1_width) // 2
+        
+        msg2_bbox = draw.textbbox((0, 0), message2, font=font_message)
+        msg2_width = msg2_bbox[2] - msg2_bbox[0]
+        msg2_x = (WIDTH - msg2_width) // 2
+        
+        draw.text((msg1_x, 136), message, fill=(150, 255, 150), font=font_message)
+        draw.text((msg2_x, 148), message2, fill=(150, 255, 150), font=font_message)
+        
+        # Display on screen
+        disp.display(img)
+
+# ================================
+# MAIN LOOP
+# ================================
+def main():
+    print("=" * 60)
+    print("TFT DISPLAY WITH DHT11 SENSOR")
+    print("=" * 60)
+    
+    # Connect to pigpio
+    pi = pigpio.pi()
+    if not pi.connected:
+        print("❌ Error: pigpio daemon not running!")
+        print("Start it with: sudo systemctl start pigpiod")
+        return
+    
+    print("✅ Connected to pigpio daemon")
+    
+    # Initialize sensor and display
+    sensor = DHT11Reader(pi, DHT_PIN)
+    display_manager = SensorDisplay()
+    
+    print("✅ Display initialized")
+    print("📊 Monitoring sensor and updating display...")
+    print("Press Ctrl+C to stop\n")
+    
+    last_sensor_read = 0
+    SENSOR_INTERVAL = 3  # Read sensor every 3 seconds
+    
+    try:
+        while True:
+            current_time = time.time()
+            
+            # Read sensor at intervals
+            if current_time - last_sensor_read >= SENSOR_INTERVAL:
+                sensor.trigger()
+                time.sleep(0.3)
+                
+                temperature = sensor.temperature
+                humidity = sensor.humidity
+                
+                # Strict validation - reject unrealistic readings
+                # Temperature should be between 15-40°C for indoor readings
+                # Humidity should be between 20-80% typically
+                valid_temp = (15 <= temperature <= 40)
+                valid_humidity = (20 <= humidity <= 80)
+                
+                # Only update if BOTH values are valid
+                if valid_temp and valid_humidity:
+                    # Additional sanity check - reject if values jump too much
+                    if display_manager.last_temp is not None:
+                        temp_diff = abs(temperature - display_manager.last_temp)
+                        humid_diff = abs(humidity - display_manager.last_humidity)
+                        # Reject if temperature changes more than 5°C or humidity more than 20% in 3 seconds
+                        if temp_diff > 5 or humid_diff > 20:
+                            temperature = None
+                            humidity = None
+                        else:
+                            print(f"✅ Temp: {temperature}°C, Humidity: {humidity}%")
+                    else:
+                        # First reading - accept if within valid range
+                        print(f"✅ Temp: {temperature}°C, Humidity: {humidity}%")
+                else:
+                    # Invalid readings - don't use them
+                    temperature = None
+                    humidity = None
+                
+                last_sensor_read = current_time
+            else:
+                # Keep previous values for display update
+                temperature = None
+                humidity = None
+            
+            # Update display every loop (shows current time)
+            display_manager.update(temperature, humidity)
+            
+            time.sleep(0.5)  # Update display twice per second for smooth time updates
+            
+    except KeyboardInterrupt:
+        print("\n✅ Display stopped")
+    finally:
+        sensor.cancel()
+        pi.stop()
+        # Clear display
+        draw.rectangle((0, 0, WIDTH, HEIGHT), fill=(0, 0, 0))
+        disp.display(img)
+
+if __name__ == "__main__":
+    main()

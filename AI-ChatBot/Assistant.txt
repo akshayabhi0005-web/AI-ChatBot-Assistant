@@ -1,0 +1,378 @@
+import os
+import time
+import requests
+import subprocess
+import threading
+import speech_recognition as sr
+from dotenv import load_dotenv
+from PIL import Image, ImageDraw, ImageFont
+import st7735
+
+# ================================
+# LOAD API KEY
+# ================================
+load_dotenv(os.path.expanduser("~/.env"))
+API_KEY = os.getenv("GROQ_API_KEY")
+
+if not API_KEY:
+    raise RuntimeError("GROQ_API_KEY not found")
+
+API_URL = "https://api.groq.com/openai/v1/chat/completions"
+MODEL = "llama-3.1-8b-instant"
+
+# ================================
+# SPEECH RECOGNITION
+# ================================
+recognizer = sr.Recognizer()
+
+# ================================
+# ST7735 TFT DISPLAY (SPI) - FOR TEXT
+# ================================
+disp = st7735.ST7735(
+    port=0,
+    cs=st7735.BG_SPI_CS_BACK,
+    dc="GPIO24",
+    rst="GPIO25",
+    backlight="GPIO22",
+    rotation=90,
+    invert=False,
+    spi_speed_hz=4000000
+)
+disp.begin()
+
+WIDTH, HEIGHT = disp.width, disp.height
+
+img = Image.new("RGB", (WIDTH, HEIGHT), (0, 0, 0))
+draw = ImageDraw.Draw(img)
+
+# Load font
+try:
+    font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 9)
+except:
+    try:
+        font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 9)
+    except:
+        font = ImageFont.load_default()
+
+LINE_HEIGHT = 11
+CHAR_WIDTH = 6
+
+# ================================
+# OLED ANIMATION CONTROLLER (I2C)
+# ================================
+class AnimationController:
+    def __init__(self):
+        self.animation_process = None
+        self.current_animation = None
+        
+    def start_animation(self, animation_name):
+        """Start an animation by running the corresponding Python file"""
+        self.stop_animation()
+        
+        animation_files = {
+            "listening": "mic.py",
+            "recognizing": "recognize.py",
+            "thinking": "think.py",
+            "speaking": "speaker.py"
+        }
+        
+        if animation_name not in animation_files:
+            print(f⚠️ Unknown animation: {animation_name}")
+            return
+        
+        animation_file = animation_files[animation_name]
+        
+        # Check if file exists
+        if not os.path.exists(animation_file):
+            print(f"⚠️ Animation file not found: {animation_file}")
+            return
+        
+        try:
+            # Run the animation script as a subprocess
+            self.animation_process = subprocess.Popen(
+                ["python3", animation_file],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL
+            )
+            self.current_animation = animation_name
+            print(f"✅ Started {animation_name} animation ({animation_file})")
+        except Exception as e:
+            print(f"❌ Error starting animation: {e}")
+    
+    def stop_animation(self):
+        """Stop the current animation"""
+        if self.animation_process:
+            try:
+                self.animation_process.terminate()
+                self.animation_process.wait(timeout=1)
+                print(f"⏹️ Stopped {self.current_animation} animation")
+            except:
+                try:
+                    self.animation_process.kill()
+                except:
+                    pass
+            self.animation_process = None
+            self.current_animation = None
+
+animator = AnimationController()
+
+# ================================
+# TFT DISPLAY MANAGER - FOR TEXT
+# ================================
+class DisplayManager:
+    def __init__(self):
+        self.lines = []
+        self.scroll_offset = 0
+        self.max_lines = HEIGHT // LINE_HEIGHT
+        
+    def clear(self):
+        self.lines = []
+        self.scroll_offset = 0
+        self.update_display()
+    
+    def add_text(self, text, prefix=""):
+        """Add text and wrap it to fit display width"""
+        if prefix:
+            text = f"{prefix} {text}"
+        
+        max_chars = WIDTH // CHAR_WIDTH - 1
+        words = text.split()
+        current_line = ""
+        
+        for word in words:
+            if len(current_line) + len(word) + 1 <= max_chars:
+                current_line += (word + " ")
+            else:
+                if current_line:
+                    self.lines.append(current_line.strip())
+                current_line = word + " "
+        
+        if current_line:
+            self.lines.append(current_line.strip())
+        
+        if len(self.lines) > self.max_lines:
+            self.scroll_offset = len(self.lines) - self.max_lines
+        
+        self.update_display()
+    
+    def set_lines(self, lines):
+        """Set exact lines to display"""
+        self.lines = lines
+        self.scroll_offset = 0
+        if len(self.lines) > self.max_lines:
+            self.scroll_offset = len(self.lines) - self.max_lines
+        self.update_display()
+    
+    def update_display(self):
+        """Render current lines to TFT display"""
+        draw.rectangle((0, 0, WIDTH, HEIGHT), fill=(0, 0, 0))
+        
+        y = 4
+        visible_lines = self.lines[self.scroll_offset:self.scroll_offset + self.max_lines]
+        
+        for line in visible_lines:
+            draw.text((6, y), line, fill=(255, 255, 255), font=font)
+            y += LINE_HEIGHT
+        
+        disp.display(img)
+
+display = DisplayManager()
+
+# ================================
+# TEXT TO SPEECH HANDLER
+# ================================
+class SpeechHandler:
+    def __init__(self):
+        self.is_speaking = False
+        self.current_process = None
+    
+    def speak_with_display(self, text):
+        """Speak while showing animation on OLED and text on TFT"""
+        self.is_speaking = True
+        
+        # Start speaker animation on OLED
+        animator.start_animation("speaking")
+        
+        # Display text on TFT
+        display.clear()
+        display.add_text(text, "Bot:")
+        
+        # Start speaking in background
+        try:
+            self.current_process = subprocess.Popen(
+                ["espeak", "-s", "150", text],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL
+            )
+            print("🗣️ Speaking started")
+        except Exception as e:
+            print(f"⚠️ Speech error: {e}")
+            animator.stop_animation()
+            self.is_speaking = False
+            return
+        
+        # Calculate if scrolling is needed
+        total_lines = len(display.lines)
+        max_visible = display.max_lines
+        needs_scroll = total_lines > max_visible
+        
+        # Scroll text on TFT while speaking and animation runs on OLED
+        if needs_scroll:
+            scroll_steps = total_lines - max_visible + 1
+            time_per_step = 2
+            
+            print(f"📜 Scrolling {scroll_steps} steps...")
+            for offset in range(scroll_steps):
+                # Check if speech is still running
+                if self.current_process.poll() is not None:
+                    print("✅ Speech finished during scroll")
+                    break
+                
+                display.scroll_offset = offset
+                display.update_display()
+                time.sleep(time_per_step)
+        
+        # Wait for speech to finish if still running
+        if self.current_process and self.current_process.poll() is None:
+            print("⏳ Waiting for speech to finish...")
+            try:
+                self.current_process.wait(timeout=15)
+                print("✅ Speech finished")
+            except subprocess.TimeoutExpired:
+                print("⚠️ Speech timeout, terminating...")
+                self.current_process.terminate()
+        
+        # Stop animation on OLED
+        animator.stop_animation()
+        
+        time.sleep(1)
+        print("✅ Ready for next question")
+        
+        self.is_speaking = False
+    
+    def stop(self):
+        """Stop current speech"""
+        self.is_speaking = False
+        if self.current_process:
+            try:
+                self.current_process.terminate()
+            except:
+                pass
+
+speech_handler = SpeechHandler()
+
+# ================================
+# GROQ REQUEST
+# ================================
+def ask_groq(prompt):
+    headers = {
+        "Authorization": f"Bearer {API_KEY}",
+        "Content-Type": "application/json"
+    }
+
+    payload = {
+        "model": MODEL,
+        "messages": [{"role": "user", "content": prompt}],
+        "max_tokens": 200,
+        "temperature": 0.7
+    }
+
+    try:
+        r = requests.post(API_URL, headers=headers, json=payload, timeout=30)
+        if r.status_code != 200:
+            raise RuntimeError(r.text)
+        return r.json()["choices"][0]["message"]["content"]
+    except Exception as e:
+        print(f"❌ Groq API error: {e}")
+        return "Sorry, I couldn't process that request."
+
+# ================================
+# MAIN LOOP
+# ================================
+def main():
+    with sr.Microphone() as source:
+        display.set_lines(["Calibrating", "microphone..."])
+        print("🎙 Calibrating microphone...")
+        recognizer.adjust_for_ambient_noise(source, duration=1)
+
+        display.set_lines(["Ready!", "Speak now"])
+        print("✅ Ready. Speak anytime\n")
+
+        while True:
+            try:
+                print("🔄 Loop iteration starting...")
+                
+                # Start listening animation on OLED
+                animator.start_animation("listening")
+                display.set_lines(["Listening..."])
+                print("🎧 Listening...")
+                audio = recognizer.listen(source, timeout=None, phrase_time_limit=10)
+
+                # Start recognizing animation on OLED
+                animator.start_animation("recognizing")
+                display.set_lines(["Recognizing..."])
+                print("🧠 Recognizing...")
+                text = recognizer.recognize_google(audio)
+                print("👤 You:", text)
+
+                # Check for exit commands
+                if text.lower() in ["stop", "goodbye", "exit", "quit"]:
+                    animator.stop_animation()
+                    display.set_lines(["Goodbye!"])
+                    speech_handler.speak_with_display("Goodbye")
+                    break
+
+                # Display user input on TFT, stop OLED animation
+                animator.stop_animation()
+                display.clear()
+                display.add_text(text, "You:")
+                time.sleep(1)
+
+                # Start thinking animation on OLED
+                print("🤖 Thinking...")
+                animator.start_animation("thinking")
+                display.set_lines(["Thinking..."])
+
+                # Get AI response
+                reply = ask_groq(text)
+                print("🤖 Bot:", reply)
+
+                # Stop thinking animation
+                animator.stop_animation()
+
+                # Speak with speaker animation on OLED and text scroll on TFT
+                speech_handler.speak_with_display(reply)
+
+            except sr.WaitTimeoutError:
+                print("⏱️ Listening timeout")
+                continue
+
+            except sr.UnknownValueError:
+                animator.stop_animation()
+                display.set_lines(["Didn't catch", "that"])
+                print("⚠️ Could not understand")
+                time.sleep(1)
+
+            except KeyboardInterrupt:
+                animator.stop_animation()
+                display.set_lines(["Exiting..."])
+                print("\n👋 Interrupted by user")
+                speech_handler.stop()
+                break
+
+            except Exception as e:
+                animator.stop_animation()
+                display.set_lines(["Error"])
+                print("❌ Error:", e)
+                time.sleep(2)
+
+# ================================
+# ENTRY POINT
+# ================================
+if __name__ == "__main__":
+    try:
+        main()
+    finally:
+        animator.stop_animation()
+        display.set_lines(["Goodbye!"])
+        print("✅ Program ended")

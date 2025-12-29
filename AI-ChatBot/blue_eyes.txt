@@ -1,0 +1,341 @@
+import time
+import random
+from luma.core.interface.serial import i2c
+from luma.core.render import canvas
+from luma.oled.device import ssd1306
+from PIL import ImageDraw
+
+# ================================
+# OLED SETUP
+# ================================
+# Create I2C interface (address 0x3C is default for most SSD1306 displays)
+serial = i2c(port=1, address=0x3C)
+device = ssd1306(serial)
+
+SCREEN_WIDTH = 128
+SCREEN_HEIGHT = 64
+
+# ================================
+# EYE REFERENCE STATE
+# ================================
+ref_eye_height = 40
+ref_eye_width = 40
+ref_space_between_eye = 10
+ref_corner_radius = 10
+
+# Current state of the eyes
+left_eye_height = ref_eye_height
+left_eye_width = ref_eye_width
+left_eye_x = 32
+left_eye_y = 32
+right_eye_x = 32 + ref_eye_width + ref_space_between_eye
+right_eye_y = 32
+right_eye_height = ref_eye_height
+right_eye_width = ref_eye_width
+
+# ================================
+# DRAWING FUNCTIONS
+# ================================
+def draw_eyes(update=True):
+    global left_eye_x, left_eye_y, left_eye_width, left_eye_height
+    global right_eye_x, right_eye_y, right_eye_width, right_eye_height
+    
+    # Ensure dimensions are always positive
+    safe_left_height = max(2, left_eye_height)
+    safe_left_width = max(2, left_eye_width)
+    safe_right_height = max(2, right_eye_height)
+    safe_right_width = max(2, right_eye_width)
+    
+    with canvas(device) as draw:
+        # Draw left eye
+        x = int(left_eye_x - safe_left_width / 2)
+        y = int(left_eye_y - safe_left_height / 2)
+        draw.rounded_rectangle(
+            [(x, y), (x + safe_left_width, y + safe_left_height)],
+            radius=min(ref_corner_radius, safe_left_height // 2, safe_left_width // 2),
+            fill="white"
+        )
+        
+        # Draw right eye
+        x = int(right_eye_x - safe_right_width / 2)
+        y = int(right_eye_y - safe_right_height / 2)
+        draw.rounded_rectangle(
+            [(x, y), (x + safe_right_width, y + safe_right_height)],
+            radius=min(ref_corner_radius, safe_right_height // 2, safe_right_width // 2),
+            fill="white"
+        )
+
+def center_eyes(update=True):
+    global left_eye_height, left_eye_width, right_eye_height, right_eye_width
+    global left_eye_x, left_eye_y, right_eye_x, right_eye_y
+    
+    left_eye_height = ref_eye_height
+    left_eye_width = ref_eye_width
+    right_eye_height = ref_eye_height
+    right_eye_width = ref_eye_width
+    
+    left_eye_x = SCREEN_WIDTH // 2 - ref_eye_width // 2 - ref_space_between_eye // 2
+    left_eye_y = SCREEN_HEIGHT // 2
+    right_eye_x = SCREEN_WIDTH // 2 + ref_eye_width // 2 + ref_space_between_eye // 2
+    right_eye_y = SCREEN_HEIGHT // 2
+    
+    draw_eyes(update)
+
+def blink(speed=12):
+    global left_eye_height, right_eye_height
+    
+    draw_eyes()
+    
+    # Close eyes
+    for i in range(3):
+        left_eye_height -= speed
+        right_eye_height -= speed
+        draw_eyes()
+        time.sleep(0.001)
+    
+    # Open eyes
+    for i in range(3):
+        left_eye_height += speed
+        right_eye_height += speed
+        draw_eyes()
+        time.sleep(0.001)
+
+def sleep():
+    global left_eye_height, right_eye_height
+    
+    left_eye_height = 2
+    right_eye_height = 2
+    draw_eyes(True)
+
+def wakeup():
+    global left_eye_height, right_eye_height
+    
+    sleep()
+    
+    for h in range(0, ref_eye_height + 1, 2):
+        left_eye_height = h
+        right_eye_height = h
+        draw_eyes(True)
+
+def happy_eye():
+    center_eyes(False)
+    
+    # Draw inverted triangles over lower part of eyes
+    offset = ref_eye_height // 2
+    
+    for i in range(10):
+        with canvas(device) as draw:
+            # Draw left eye
+            x = int(left_eye_x - left_eye_width / 2)
+            y = int(left_eye_y - left_eye_height / 2)
+            draw.rounded_rectangle(
+                [(x, y), (x + left_eye_width, y + left_eye_height)],
+                radius=ref_corner_radius,
+                fill="white"
+            )
+            
+            # Draw right eye
+            x = int(right_eye_x - right_eye_width / 2)
+            y = int(right_eye_y - right_eye_height / 2)
+            draw.rounded_rectangle(
+                [(x, y), (x + right_eye_width, y + right_eye_height)],
+                radius=ref_corner_radius,
+                fill="white"
+            )
+            
+            # Draw black triangles to create happy expression
+            draw.polygon([
+                (left_eye_x - left_eye_width // 2 - 1, left_eye_y + offset),
+                (left_eye_x + left_eye_width // 2 + 1, left_eye_y + 5 + offset),
+                (left_eye_x - left_eye_width // 2 - 1, left_eye_y + left_eye_height + offset)
+            ], fill="black")
+            
+            draw.polygon([
+                (right_eye_x + right_eye_width // 2 + 1, right_eye_y + offset),
+                (right_eye_x - right_eye_width // 2 - 1, right_eye_y + 5 + offset),
+                (right_eye_x + right_eye_width // 2 + 1, right_eye_y + right_eye_height + offset)
+            ], fill="black")
+        
+        offset -= 2
+        time.sleep(0.001)
+    
+    time.sleep(1)
+
+def saccade(direction_x, direction_y):
+    global left_eye_x, right_eye_x, left_eye_y, right_eye_y
+    global left_eye_height, right_eye_height
+    
+    direction_x_movement_amplitude = 8
+    direction_y_movement_amplitude = 6
+    blink_amplitude = 8
+    
+    # Quick movement
+    for i in range(1):
+        left_eye_x += direction_x_movement_amplitude * direction_x
+        right_eye_x += direction_x_movement_amplitude * direction_x
+        left_eye_y += direction_y_movement_amplitude * direction_y
+        right_eye_y += direction_y_movement_amplitude * direction_y
+        
+        right_eye_height -= blink_amplitude
+        left_eye_height -= blink_amplitude
+        draw_eyes()
+        time.sleep(0.001)
+    
+    for i in range(1):
+        left_eye_x += direction_x_movement_amplitude * direction_x
+        right_eye_x += direction_x_movement_amplitude * direction_x
+        left_eye_y += direction_y_movement_amplitude * direction_y
+        right_eye_y += direction_y_movement_amplitude * direction_y
+        
+        right_eye_height += blink_amplitude
+        left_eye_height += blink_amplitude
+        draw_eyes()
+        time.sleep(0.001)
+
+def move_big_eye(direction):
+    global left_eye_x, right_eye_x, left_eye_height, right_eye_height
+    global left_eye_width, right_eye_width
+    
+    direction_oversize = 1
+    direction_movement_amplitude = 2
+    blink_amplitude = 5
+    
+    # Move and enlarge
+    for i in range(3):
+        left_eye_x += direction_movement_amplitude * direction
+        right_eye_x += direction_movement_amplitude * direction
+        right_eye_height -= blink_amplitude
+        left_eye_height -= blink_amplitude
+        
+        if direction > 0:
+            right_eye_height += direction_oversize
+            right_eye_width += direction_oversize
+        else:
+            left_eye_height += direction_oversize
+            left_eye_width += direction_oversize
+        
+        draw_eyes()
+        time.sleep(0.001)
+    
+    for i in range(3):
+        left_eye_x += direction_movement_amplitude * direction
+        right_eye_x += direction_movement_amplitude * direction
+        right_eye_height += blink_amplitude
+        left_eye_height += blink_amplitude
+        
+        if direction > 0:
+            right_eye_height += direction_oversize
+            right_eye_width += direction_oversize
+        else:
+            left_eye_height += direction_oversize
+            left_eye_width += direction_oversize
+        
+        draw_eyes()
+        time.sleep(0.001)
+    
+    time.sleep(1)
+    
+    # Move back and shrink
+    for i in range(3):
+        left_eye_x -= direction_movement_amplitude * direction
+        right_eye_x -= direction_movement_amplitude * direction
+        right_eye_height -= blink_amplitude
+        left_eye_height -= blink_amplitude
+        
+        if direction > 0:
+            right_eye_height -= direction_oversize
+            right_eye_width -= direction_oversize
+        else:
+            left_eye_height -= direction_oversize
+            left_eye_width -= direction_oversize
+        
+        draw_eyes()
+        time.sleep(0.001)
+    
+    for i in range(3):
+        left_eye_x -= direction_movement_amplitude * direction
+        right_eye_x -= direction_movement_amplitude * direction
+        right_eye_height += blink_amplitude
+        left_eye_height += blink_amplitude
+        
+        if direction > 0:
+            right_eye_height -= direction_oversize
+            right_eye_width -= direction_oversize
+        else:
+            left_eye_height -= direction_oversize
+            left_eye_width -= direction_oversize
+        
+        draw_eyes()
+        time.sleep(0.001)
+    
+    center_eyes()
+
+def move_right_big_eye():
+    move_big_eye(1)
+
+def move_left_big_eye():
+    move_big_eye(-1)
+
+# ================================
+# ANIMATION LAUNCHER
+# ================================
+def launch_animation(animation_index):
+    max_animation_index = 8
+    
+    if animation_index > max_animation_index:
+        animation_index = 8
+    
+    if animation_index == 0:
+        wakeup()
+    elif animation_index == 1:
+        center_eyes(True)
+    elif animation_index == 2:
+        move_right_big_eye()
+    elif animation_index == 3:
+        move_left_big_eye()
+    elif animation_index == 4:
+        blink(10)
+    elif animation_index == 5:
+        blink(20)
+    elif animation_index == 6:
+        happy_eye()
+    elif animation_index == 7:
+        sleep()
+    elif animation_index == 8:
+        center_eyes(True)
+        for i in range(20):
+            dir_x = random.randint(-1, 1)
+            dir_y = random.randint(-1, 1)
+            saccade(dir_x, dir_y)
+            time.sleep(0.001)
+            saccade(-dir_x, -dir_y)
+            time.sleep(0.001)
+
+# ================================
+# MAIN
+# ================================
+def main():
+    # Show startup text
+    with canvas(device) as draw:
+        draw.text((10, 28), "Intellar.ca", fill="white")
+    time.sleep(2)
+    
+    sleep()
+    time.sleep(2)
+    
+    # Demo mode - cycle through animations
+    current_animation_index = 0
+    max_animation_index = 8
+    
+    try:
+        while True:
+            launch_animation(current_animation_index)
+            current_animation_index += 1
+            if current_animation_index > max_animation_index:
+                current_animation_index = 0
+    except KeyboardInterrupt:
+        device.clear()
+        print("Animation stopped")
+
+if __name__ == "__main__":
+    main()

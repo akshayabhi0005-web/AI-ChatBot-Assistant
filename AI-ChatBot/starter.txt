@@ -1,0 +1,250 @@
+import os
+import sys
+import time
+import threading
+import subprocess
+import speech_recognition as sr
+import RPi.GPIO as GPIO
+
+# ================================
+# CONFIGURATION
+# ================================
+LED_PIN = 17  # GPIO17 (Physical Pin 11)
+WAKE_WORD = "assistant"
+
+# File paths (adjust if needed)
+BLUE_EYES_SCRIPT = "blue_eyes.py"
+IDLE_SCRIPT = "idle.py"
+ZENO_SCRIPT = "zeno.py"
+
+# ================================
+# GLOBAL STATE
+# ================================
+blue_eyes_process = None
+idle_process = None
+zeno_process = None
+led_blink_active = False
+recognizer = sr.Recognizer()
+
+# ================================
+# LED CONTROL
+# ================================
+def setup_led():
+    """Initialize LED GPIO"""
+    GPIO.setmode(GPIO.BCM)
+    GPIO.setup(LED_PIN, GPIO.OUT)
+    GPIO.output(LED_PIN, GPIO.LOW)
+    print("✅ LED initialized on GPIO17")
+
+def led_blink_thread():
+    """Background thread for blinking LED while listening"""
+    global led_blink_active
+    while True:
+        if led_blink_active:
+            GPIO.output(LED_PIN, GPIO.HIGH)
+            time.sleep(0.5)
+            GPIO.output(LED_PIN, GPIO.LOW)
+            time.sleep(0.5)
+        else:
+            time.sleep(0.1)
+
+def led_on():
+    """Turn LED solid ON"""
+    global led_blink_active
+    led_blink_active = False
+    time.sleep(0.6)  # Wait for blink thread to fully stop
+    GPIO.output(LED_PIN, GPIO.HIGH)
+    print("💡 LED ON (solid)")
+
+def led_blink():
+    """Start LED blinking"""
+    global led_blink_active
+    led_blink_active = True
+    print("⚡ LED blinking (listening for wake word)")
+
+def led_off():
+    """Turn LED OFF"""
+    global led_blink_active
+    led_blink_active = False
+    time.sleep(0.1)
+    GPIO.output(LED_PIN, GPIO.LOW)
+    print("🔴 LED OFF")
+
+# ================================
+# PROCESS MANAGEMENT
+# ================================
+def start_blue_eyes():
+    """Start blue_eyes.py animation on OLED"""
+    global blue_eyes_process
+    try:
+        blue_eyes_process = subprocess.Popen(
+            ["python3", BLUE_EYES_SCRIPT],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL
+        )
+        print("👁️  Started blue_eyes.py")
+    except Exception as e:
+        print(f"❌ Error starting blue_eyes.py: {e}")
+
+def start_idle():
+    """Start idle.py display on TFT"""
+    global idle_process
+    try:
+        idle_process = subprocess.Popen(
+            ["python3", IDLE_SCRIPT],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL
+        )
+        print("📊 Started idle.py")
+    except Exception as e:
+        print(f"❌ Error starting idle.py: {e}")
+
+def stop_blue_eyes():
+    """Stop blue_eyes.py"""
+    global blue_eyes_process
+    if blue_eyes_process:
+        blue_eyes_process.terminate()
+        blue_eyes_process.wait()
+        blue_eyes_process = None
+        print("⏹️  Stopped blue_eyes.py")
+
+def stop_idle():
+    """Stop idle.py"""
+    global idle_process
+    if idle_process:
+        idle_process.terminate()
+        idle_process.wait()
+        idle_process = None
+        print("⏹️  Stopped idle.py")
+
+def run_zeno():
+    """Run zeno.py chatbot and wait for completion"""
+    global zeno_process
+    try:
+        print("\n🤖 Starting Zeno chatbot...\n")
+        zeno_process = subprocess.Popen(["python3", ZENO_SCRIPT])
+        zeno_process.wait()  # Wait for zeno to finish
+        zeno_process = None
+        print("\n✅ Zeno chatbot completed\n")
+    except Exception as e:
+        print(f"❌ Error running zeno.py: {e}")
+        zeno_process = None
+
+# ================================
+# WAKE WORD DETECTION
+# ================================
+def listen_for_wake_word():
+    """Listen for wake word 'zeno' using speech recognition"""
+    print(f"👂 Listening for wake word: '{WAKE_WORD}'...")
+    
+    with sr.Microphone() as source:
+        # Calibrate for ambient noise
+        print("🎙️  Calibrating microphone...")
+        recognizer.adjust_for_ambient_noise(source, duration=1)
+        print("✅ Ready!\n")
+        
+        while True:
+            try:
+                # Listen for audio
+                audio = recognizer.listen(source, timeout=None, phrase_time_limit=3)
+                
+                # Recognize speech
+                try:
+                    text = recognizer.recognize_google(audio).lower()
+                    print(f"🎤 Heard: '{text}'")
+                    
+                    # Check for wake word
+                    if WAKE_WORD in text:
+                        print(f"\n🎉 Wake word '{WAKE_WORD}' detected!\n")
+                        return True
+                        
+                except sr.UnknownValueError:
+                    # Couldn't understand - ignore
+                    pass
+                except sr.RequestError as e:
+                    print(f"⚠️  Speech recognition error: {e}")
+                    time.sleep(1)
+                    
+            except KeyboardInterrupt:
+                raise
+            except Exception as e:
+                print(f"⚠️  Listening error: {e}")
+                time.sleep(1)
+
+# ================================
+# MAIN CONTROLLER LOOP
+# ================================
+def main():
+    print("=" * 50)
+    print("🤖 ZENO CONTROLLER STARTED")
+    print("=" * 50)
+    print(f"Wake word: '{WAKE_WORD}'")
+    print(f"LED Pin: GPIO{LED_PIN}")
+    print("=" * 50 + "\n")
+    
+    # Setup LED
+    setup_led()
+    
+    # Start LED blink thread
+    blink_thread = threading.Thread(target=led_blink_thread, daemon=True)
+    blink_thread.start()
+    
+    # Start blinking immediately (even before idle programs start)
+    led_blink()
+    
+    try:
+        while True:
+            # IDLE STATE: Run blue_eyes and idle display
+            print("\n" + "=" * 50)
+            print("😴 IDLE MODE")
+            print("=" * 50)
+            
+            start_blue_eyes()
+            start_idle()
+            # LED already blinking from before (or from zeno completion)
+            
+            # Listen for wake word
+            wake_word_detected = listen_for_wake_word()
+            
+            if wake_word_detected:
+                # ACTIVE STATE: Stop idle programs and run zeno
+                print("\n" + "=" * 50)
+                print("🚀 ACTIVE MODE - Running Zeno")
+                print("=" * 50)
+                
+                # Stop idle programs
+                stop_blue_eyes()
+                stop_idle()
+                
+                # Turn LED solid ON (stops blinking)
+                led_on()
+                
+                # Run zeno chatbot (blocks until complete)
+                run_zeno()
+                
+                # Start LED blinking again after zeno completes
+                led_blink()
+                time.sleep(0.5)
+                
+                # Loop back to idle state
+                print("\n🔄 Returning to idle mode...\n")
+    
+    except KeyboardInterrupt:
+        print("\n\n⚠️  Controller interrupted by user")
+    
+    finally:
+        # Cleanup
+        print("\n🧹 Cleaning up...")
+        stop_blue_eyes()
+        stop_idle()
+        if zeno_process:
+            zeno_process.terminate()
+        led_off()
+        GPIO.cleanup()
+        print("✅ Cleanup complete")
+
+# ================================
+# ENTRY POINT
+# ================================
+if __name__ == "__main__":
+    main()
